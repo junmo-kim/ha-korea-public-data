@@ -4,14 +4,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.kr_public_data.exceptions import KrTransientError
 from custom_components.kr_public_data.resilience import ResilientCoordinator
+from custom_components.kr_public_data.utils import KST
 
 from . import KMA_SCAN_INTERVAL, region_key
 from .api import fetch_vilage_forecast, parse_weather
@@ -24,13 +26,28 @@ _LOGGER = logging.getLogger(__name__)
 _REQUEST_JITTER = (0.2, 0.5)
 
 
+def _uv_offset(uv: dict[str, Any], now: datetime) -> int:
+    """3-hour field offset (h0, h3, …) matching ``now``.
+
+    The living-index fields count hours from the bulletin's issue time
+    (``date``, YYYYMMDDHH KST — 06 or 18), not from midnight.
+    """
+    try:
+        issued = datetime.strptime(str(uv.get("date", "")), "%Y%m%d%H").replace(tzinfo=KST)
+    except ValueError:
+        return 0
+    hours = int((now - issued).total_seconds() // 3600)
+    return max(hours // 3 * 3, 0)
+
+
 class KMAWeatherCoordinator(ResilientCoordinator):
     stale_tolerance = 4
 
-    def __init__(self, hass: HomeAssistant, api_key: str, regions: list[dict[str, Any]],
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry,
+                 api_key: str, regions: list[dict[str, Any]],
                  air_api_key: str = "", air_station: str = "",
                  living_api_key: str = "", area_no: str = "") -> None:
-        super().__init__(hass, _LOGGER, name="kma_weather",
+        super().__init__(hass, _LOGGER, config_entry=entry, name="kma_weather",
                          update_interval=timedelta(seconds=KMA_SCAN_INTERVAL))
         self._api_key = api_key
         self._regions = regions
@@ -80,17 +97,14 @@ class KMAWeatherCoordinator(ResilientCoordinator):
             except Exception as e:
                 _LOGGER.debug("KMA O3 fetch: %s", e)
 
-        # 3. Fetch UV index from Living Weather V4 (same session)
+        # 3. Fetch UV index from Living Weather V5 (same session)
         if self._area_no:
             await asyncio.sleep(random.uniform(*_REQUEST_JITTER))
             try:
                 from custom_components.kr_public_data.airkorea.api import fetch_uv_index
                 uv = await fetch_uv_index(session, self._living_key, self._area_no)
                 if uv:
-                    from datetime import datetime
-                    from zoneinfo import ZoneInfo
-                    now = datetime.now(ZoneInfo("Asia/Seoul"))
-                    h = (now.hour // 3) * 3
+                    h = _uv_offset(uv, datetime.now(KST))
                     for field in [f"h{h}", "h0"]:
                         val = uv.get(field)
                         if val and str(val).strip():

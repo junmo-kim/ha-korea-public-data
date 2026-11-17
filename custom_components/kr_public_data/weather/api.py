@@ -1,13 +1,19 @@
 """KMA Weather Warning API client."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 
 import aiohttp
 
-from custom_components.kr_public_data.exceptions import KrTransientError, raise_for_result_code
+from custom_components.kr_public_data.exceptions import (
+    KrTransientError,
+    raise_for_gateway_error,
+    raise_for_result_code,
+)
+from custom_components.kr_public_data.utils import KST
 
 from . import (
     EVENT_TYPE_ADVISORY,
@@ -36,19 +42,17 @@ def _determine_type(item: dict[str, Any]) -> str:
         return EVENT_TYPE_CANCELLED
     ws = item.get("warnStress", 1)
     st = _parse_dt(item.get("startTime", ""))
-    if st and st <= datetime.now():
+    if st and st <= datetime.now(KST).replace(tzinfo=None):
         return EVENT_TYPE_ADVISORY if ws == 0 else EVENT_TYPE_WARNING
     return EVENT_TYPE_PRE_ADVISORY if ws == 0 else EVENT_TYPE_PRE_WARNING
 
-async def validate_kma_api(api_key: str, area_code: str) -> bool:
+async def validate_kma_api(session: aiohttp.ClientSession, api_key: str,
+                           area_code: str) -> bool:
     params = {"serviceKey": api_key, "numOfRows": "1", "pageNo": "1",
               "areaCode": area_code, "warningType": "1", "dataType": "json"}
     try:
-        async with (
-            aiohttp.ClientSession() as s,
-            s.get(KMA_API_BASE, params=params,
-                  timeout=aiohttp.ClientTimeout(total=15)) as r,
-        ):
+        async with session.get(KMA_API_BASE, params=params,
+                               timeout=aiohttp.ClientTimeout(total=15)) as r:
             if r.status != 200:
                 return False
             d = await r.json(content_type=None)
@@ -66,9 +70,11 @@ async def fetch_warning(session: aiohttp.ClientSession, api_key: str,
     try:
         async with session.get(KMA_API_BASE, params=params,
                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+            text = await r.text()
+            raise_for_gateway_error(text)
             if r.status != 200:
                 raise KrTransientError(f"기상특보 HTTP {r.status}")
-            data = await r.json(content_type=None)
+            data = json.loads(text)
     except aiohttp.ClientError as err:
         raise KrTransientError(f"기상특보 연결 실패: {err}") from err
     hdr = data.get("response", {}).get("header", {})

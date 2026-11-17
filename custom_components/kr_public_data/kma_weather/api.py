@@ -7,16 +7,19 @@ import math
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from custom_components.kr_public_data.exceptions import KrTransientError, raise_for_result_code
+from custom_components.kr_public_data.exceptions import (
+    KrTransientError,
+    raise_for_gateway_error,
+    raise_for_result_code,
+)
+from custom_components.kr_public_data.utils import KST
 
 from . import VILAGE_URL
 
 _LOGGER = logging.getLogger(__name__)
-KST = ZoneInfo("Asia/Seoul")
 
 SKY_MAP = {1: "sunny", 3: "partlycloudy", 4: "cloudy"}
 SKY_CLOUD_PCT = {1: 10, 3: 70, 4: 95}
@@ -111,6 +114,7 @@ async def fetch_vilage_forecast(
     async with session.get(VILAGE_URL, params=params,
                            timeout=aiohttp.ClientTimeout(total=20)) as r:
         text = await r.text()
+        raise_for_gateway_error(text)
         if r.status != 200:
             raise KrTransientError(f"KMA HTTP {r.status}: {text[:200]}")
     try:
